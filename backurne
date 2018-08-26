@@ -3,16 +3,15 @@
 import datetime
 import dateutil.parser
 import multiprocessing
-from termcolor import colored
 import requests
 import sys
 
+import pretty
 from config import config
 from log import log as Log
 from ceph import Ceph
 from proxmox import Proxmox
 from restore import Restore
-from prettytable import PrettyTable
 from backup import Bck
 
 
@@ -331,40 +330,9 @@ def loop(args):
 		sys.exit(len(result))
 
 
-def bold(text):
-	return colored(text, attrs=['bold'])
-
-
-def under(text):
-	return colored(text, attrs=['underline'])
-
-
-def usage():
-	me = bold(sys.argv[0])
-
-	rbd = under('rbd')
-	snap = '%s %s' % (rbd, under('snapshot'))
-	print('Usage:\t%s %s' % (me, bold('backup')))
-	print('\t%s %s' % (me, bold('check')))
-	print('\t%s %s' % (me, bold('check-snap')))
-	print('\t%s %s' % (me, bold('list-mapped')))
-	print('\t%s %s [%s]' % (me, bold('ls'), rbd))
-	print('\t%s %s %s' % (me, bold('map'), snap))
-	print('\t%s %s %s' % (me, bold('unmap'), snap))
-	exit(1)
-
-
-def Pt(header):
-	header = [bold(i) for i in header]
-	pt = PrettyTable(header)
-	pt.align = 'l'
-	pt.padding_width = 2
-	return pt
-
-
 if __name__ == '__main__':
 	if len(sys.argv) < 2:
-		usage()
+		pretty.usage()
 
 	try:
 		action = sys.argv[1]
@@ -375,7 +343,7 @@ if __name__ == '__main__':
 	if action not in ('backup', 'check', 'check-snap', 'ls', 'list-mapped',
 			'map', 'unmap'):
 		Log.error('Action %s unknown' % (action,))
-		usage()
+		pretty.usage()
 
 	if action in ('backup', 'check', 'check-snap'):
 		loop(action)
@@ -407,13 +375,13 @@ if __name__ == '__main__':
 	if action == 'ls':
 		data = restore.ls()
 		if rbd is None:
-			pt = Pt(['Ident', 'Disk', 'UUID'])
+			pt = pretty.Pt(['Ident', 'Disk', 'UUID'])
 
 			for i in data:
 				row = [i['ident'], i['disk'], i['uuid']]
 				pt.add_row(row)
 		else:
-			pt = Pt(['Creation date', 'UUID'])
+			pt = pretty.Pt(['Creation date', 'UUID'])
 
 			for i in data:
 				row = [i['creation'], i['uuid']]
@@ -421,15 +389,15 @@ if __name__ == '__main__':
 		print(pt)
 	elif action == 'list-mapped':
 		data = restore.list_mapped()
-		pt = Pt(['rbd', 'snap', 'mount'])
+		pt = pretty.Pt(['rbd', 'snap', 'mount'])
 		for i in data:
 			pt.add_row([i['parent_image'], i['parent_snap'], i['mountpoint']])
 		print(pt)
 	elif action == 'map':
 		if rbd is None or snap is None:
-			usage()
+			pretty.usage()
 		restore.mount()
 	elif action == 'unmap':
 		if rbd is None or snap is None:
-			usage()
+			pretty.usage()
 		restore.umount()
