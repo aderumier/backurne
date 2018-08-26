@@ -308,28 +308,6 @@ def expire_img(i):
 		ceph.backup.rm(image)
 
 
-def loop(args):
-	result = list()
-
-	for cluster in config['live_clusters']:
-		if args == 'backup':
-			Log.info('Backuping %s: %s' % (cluster['type'], cluster['name']))
-			Backup(cluster)
-		else:
-			Log.info('Checking %s: %s' % (cluster['type'], cluster['name']))
-			check = Check(cluster)
-			if args == 'check':
-				ret = check.check()
-			else:
-				ret = check.check_snap()
-			result += ret
-	if len(result) > 0:
-		for err in result:
-			Log.error(err)
-		Log.info('At the end, we failed: %s errors found' % (len(result),))
-		sys.exit(len(result))
-
-
 if __name__ == '__main__':
 	if len(sys.argv) < 2:
 		pretty.usage()
@@ -345,10 +323,29 @@ if __name__ == '__main__':
 		Log.error('Action %s unknown' % (action,))
 		pretty.usage()
 
-	if action in ('backup', 'check', 'check-snap'):
-		loop(action)
-		if action != 'backup':
-			exit(0)
+	if action in ('check', 'check-snap'):
+		result = list()
+
+		for cluster in config['live_clusters']:
+			Log.info('Checking %s: %s' % (cluster['type'], cluster['name']))
+			check = Check(cluster)
+			if action == 'check':
+				ret = check.check()
+			else:
+				ret = check.check_snap()
+			result += ret
+
+		if len(result) > 0:
+			for err in result:
+				Log.error(err)
+			Log.info('At the end, we failed: %s errors found' % (len(result),))
+		exit(len(result))
+
+	if action == 'backup':
+		for cluster in config['live_clusters']:
+			Log.info('Backuping %s: %s' % (cluster['type'], cluster['name']))
+			Backup(cluster)
+
 		Log.info('Expiring our snapshots')
 		# Dummy Ceph object used to retrieve the real backup Object
 		ceph = Ceph(None)
