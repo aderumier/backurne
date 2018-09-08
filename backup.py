@@ -73,12 +73,12 @@ class Bck(object):
 		else:
 			delta = datetime.timedelta(hours=1)
 		not_after = datetime.datetime.now() - delta
-		if last_profile is not None:
-			last_time = last_profile.split(';')[3]
-			last_time = dateutil.parser.parse(last_time)
-			if last_time > not_after:
-				Log.info('Our last backup is still young, nothing to do')
-				return False
+#		if last_profile is not None:
+#			last_time = last_profile.split(';')[3]
+#			last_time = dateutil.parser.parse(last_time)
+#			if last_time > not_after:
+#				Log.info('Our last backup is still young, nothing to do')
+#				return False
 		return True
 
 	def make_snap(self, profile, value):
@@ -108,7 +108,7 @@ class Bck(object):
 		snap_name = '%s;%s' % (self.snap_name, now)
 		self.last_created_snap = snap_name
 
-		self.ceph.mk_snap(self.rbd, snap_name, self.vm)
+#		self.ceph.mk_snap(self.rbd, snap_name, self.vm)
 
 		return dest, last_snap, snap_name
 
