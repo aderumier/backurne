@@ -176,41 +176,49 @@ class Bidule(object):
 			Log.warn('Exception thrown while fetching more profiles for %s : %s' % (vm, e))
 		return profiles
 
+	def __create_snap_px(self, vm):
+		px = Proxmox(self.cluster)
+		try:
+			# We freeze the VM once, thus create all snaps at the same time
+			# Exports are done after thawing, because it it time-consuming,
+			# and we must not keep the VM frozen more than necessary
+			px.freeze(vm['node'], vm)
+
+			for disk in vm['to_backup']:
+				ceph = px.ceph_storage[disk['ceph']]
+				backup = Bck(disk['ceph'], ceph, disk['rbd'], vm=vm, adapter=disk['adapter'])
+
+				profiles = self.__fetch_profiles(vm, disk)
+				for profile, value in profiles:
+					if not backup.check_profile(profile):
+						continue
+					dest, last_snap, snap_name = backup.make_snap(profile, value['count'])
+					if dest is not None:
+						queue.put({
+								'dest': dest,
+								'last_snap': last_snap,
+								'snap_name': snap_name,
+								'backup': backup,
+						})
+		except Exception as e:
+			Log.warn('create_snaps: %s thrown while processing %s' % (e, vm))
+
+		try:
+			px.thaw(vm['node'], vm)
+		except:
+			Log.warn('create_snaps: thaw failed while processing %s' % (vm,))
+
+
 	def create_snaps_px(self, queue):
 		px = Proxmox(self.cluster)
 		vms = px.vms()
 		vms = self.__filter_vm(vms)
 
-		for vm in vms:
-			try:
-				# We freeze the VM once, thus create all snaps at the same time
-				# Exports are done after thawing, because it it time-consuming,
-				# and we must not keep the VM frozen more than necessary
-				px.freeze(vm['node'], vm)
+		self.queue = queue
 
-				for disk in vm['to_backup']:
-					ceph = px.ceph_storage[disk['ceph']]
-					backup = Bck(disk['ceph'], ceph, disk['rbd'], vm=vm, adapter=disk['adapter'])
-
-					profiles = self.__fetch_profiles(vm, disk)
-					for profile, value in profiles:
-						if not backup.check_profile(profile):
-							continue
-						dest, last_snap, snap_name = backup.make_snap(profile, value['count'])
-						if dest is not None:
-							queue.put({
-									'dest': dest,
-									'last_snap': last_snap,
-									'snap_name': snap_name,
-									'backup': backup,
-							})
-			except Exception as e:
-				Log.warn('create_snaps: %s thrown while processing %s' % (e, vm))
-
-			try:
-				px.thaw(vm['node'], vm)
-			except:
-				Log.warn('create_snaps: thaw failed while processing %s' % (vm,))
+		with multiprocessing.Pool(config['snapshooter_processes']) as pool:
+			for i in pool.imap_unordered(self.__create_snap_px, vms):
+				pass
 
 	def create_snaps_plain(self, queue):
 		ceph = Ceph(self.cluster['pool'], endpoint=self.cluster['fqdn'])
