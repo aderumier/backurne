@@ -130,8 +130,10 @@ class Bidule(object):
 		self.queue = queue
 		if cluster['type'] == 'proxmox':
 			self.create_snaps = self.create_snaps_px
+			self.expire_live = self.expire_live_px
 		else:
 			self.create_snaps = self.create_snaps_plain
+			self.expire_live = self.expire_live_plain
 
 	def __filter_vm(self, vms):
 		result = list()
@@ -235,6 +237,32 @@ class Bidule(object):
 							'snap_name': snap_name,
 							'backup': backup,
 					})
+
+	def __expire_live(self, vm):
+		try:
+			px = Proxmox(self.cluster)
+			for disk in vm['to_backup']:
+				ceph = px.ceph_storage[disk['ceph']]
+				backup = Bck(disk['ceph'], ceph, disk['rbd'], vm=vm)
+				backup.expire_live()
+		except Exception as e:
+			Log.warn('Expire_live on %s : %s' % (vm, e))
+
+	def expire_live_px(self):
+		px = Proxmox(self.cluster)
+		vms = px.vms()
+		vms = self.__filter_vm(vms)
+
+		with multiprocessing.Pool(config['snapshooter_processes']) as pool:
+			for i in pool.imap_unordered(self.__expire_live, vms):
+				pass
+
+	def expire_live_plain(self):
+		ceph = Ceph(self.cluster['pool'], endpoint=self.cluster['fqdn'])
+		for rbd in ceph.ls():
+			backup = Bck(self.cluster['name'], ceph, rbd)
+			backup.expire_live()
+
 
 #	def px(self):
 #		px = Proxmox(self.cluster)
@@ -502,7 +530,6 @@ class Consumer(object):
 				Log.error(e)
 
 
-
 if __name__ == '__main__':
 	if len(sys.argv) < 2:
 		pretty.usage()
@@ -560,19 +587,23 @@ if __name__ == '__main__':
 
 		manager.shutdown()
 
-		Log.info("J'ai fini !")
-		exit(0)
+		Log.info('Le manager est mort!')
+		for cluster in config['live_clusters']:
+			Log.info('Expire snapshots from live %s: %s' % (cluster['type'], cluster['name']))
+			bidule = Bidule(cluster, None)
+			bidule.expire_live()
+		Log.info('expire terminé')
 
 		Log.info('Expiring our snapshots')
 		# Dummy Ceph object used to retrieve the real backup Object
 		ceph = Ceph(None)
 
-		pool = multiprocessing.Pool(config['expire_processes'])
 		data = list()
 		for i in ceph.backup.ls():
 			data.append({'ceph': ceph, 'image': i})
-		for i in pool.imap_unordered(expire_img, data):
-			pass
+		with multiprocessing.Pool(config['expire_processes']) as pool:
+			for i in pool.imap_unordered(expire_img, data):
+				pass
 		exit(0)
 
 	try:
