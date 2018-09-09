@@ -125,8 +125,9 @@ def dl_worker(snap):
 
 
 class Bidule(object):
-	def __init__(self, cluster):
+	def __init__(self, cluster, queue):
 		self.cluster = cluster
+		self.queue = queue
 		if cluster['type'] == 'proxmox':
 			self.create_snaps = self.create_snaps_px
 		else:
@@ -176,7 +177,7 @@ class Bidule(object):
 			Log.warn('Exception thrown while fetching more profiles for %s : %s' % (vm, e))
 		return profiles
 
-	def __create_snap_px(self, vm):
+	def create_snap_px(self, vm):
 		px = Proxmox(self.cluster)
 		try:
 			# We freeze the VM once, thus create all snaps at the same time
@@ -209,18 +210,16 @@ class Bidule(object):
 			Log.warn('create_snaps: thaw failed while processing %s' % (vm,))
 
 
-	def create_snaps_px(self, queue):
+	def create_snaps_px(self):
 		px = Proxmox(self.cluster)
 		vms = px.vms()
 		vms = self.__filter_vm(vms)
 
-		self.queue = queue
-
 		with multiprocessing.Pool(config['snapshooter_processes']) as pool:
-			for i in pool.imap_unordered(self.__create_snap_px, vms):
+			for i in pool.imap_unordered(self.create_snap_px, vms):
 				pass
 
-	def create_snaps_plain(self, queue):
+	def create_snaps_plain(self):
 		ceph = Ceph(self.cluster['pool'], endpoint=self.cluster['fqdn'])
 		for rbd in ceph.ls():
 			backup = Bck(self.cluster['name'], ceph, rbd)
@@ -230,17 +229,17 @@ class Bidule(object):
 					continue
 				dest, last_snap, snap_name = backup.make_snap(profile, value['count'])
 				if dest is not None:
-					queue.put({
+					self.queue.put({
 							'dest': dest,
 							'last_snap': last_snap,
 							'snap_name': snap_name,
 							'backup': backup,
 					})
 
-	def px(self):
-		px = Proxmox(self.cluster)
-		vms = px.vms()
-		vms = self.__filter_vm(vms)
+#	def px(self):
+#		px = Proxmox(self.cluster)
+#		vms = px.vms()
+#		vms = self.__filter_vm(vms)
 
 #		Log.info('I will now download %s snaps from px %s' % (len(new_snaps), self.cluster['name']))
 #		truc = multiprocessing.get_context('spawn').Pool(config['download_worker'])
@@ -253,8 +252,8 @@ class Bidule(object):
 #		pool.close()
 #		pool.join()
 
-	def plain(self):
-		print('plain')
+#	def plain(self):
+#		print('plain')
 #		ceph = Ceph(self.cluster['pool'], endpoint=self.cluster['fqdn'])
 #		for rbd in ceph.ls():
 #			backup = Bck(self.cluster['name'], ceph, rbd)
@@ -468,10 +467,40 @@ class Producer(object):
 	def __work__(self):
 		for cluster in config['live_clusters']:
 			Log.info('Backuping %s: %s' % (cluster['type'], cluster['name']))
-			bidule = Bidule(cluster)
-			bidule.create_snaps(self.queue)
-		self.queue.put(None)
+			bidule = Bidule(cluster, self.queue)
+			bidule.create_snaps()
+
+		# We send one None per download_worker
+		# That way, all of them shall die
+		for i in range(0, config['download_worker']):
+			self.queue.put(None)
 		Log.info('work ok')
+
+class Consumer(object):
+	def __init__(self, queue):
+		self.queue = queue
+
+	def __call__(self):
+		print('consumer: start')
+		try:
+			self.__work__()
+		except Exception as e:
+			Log.error('Consumer: %s' % (e,))
+		print('consumer: end')
+
+	def __work__(self):
+		while True:
+			snap = self.queue.get()
+			print(snap)
+			if snap is None:
+				break
+
+			try:
+				backup = snap['backup']
+				backup.dl_snap(snap['snap_name'], snap['dest'], snap['last_snap'])
+			except Exception as e:
+				Log.error(e)
+
 
 
 if __name__ == '__main__':
@@ -517,14 +546,22 @@ if __name__ == '__main__':
 		atexit.register(producer.terminate)
 		producer.start()
 
-		while True:
-			item = queue.get()
-			print('received: %s' % (item,))
-			if item is None:
-				manager.shutdown()
-				break
+		download_workers = list()
+		for i in range(0, config['download_worker']):
+			pid = multiprocessing.Process(target=Consumer(queue))
+			atexit.register(pid.terminate)
+			download_workers.append(pid)
+			pid.start()
+
+		# Workers will exit upon a None reception
+		# When all of them are done, we are done
+		for pid in download_workers:
+			pid.join()
+
+		manager.shutdown()
 
 		Log.info("J'ai fini !")
+		exit(0)
 
 		Log.info('Expiring our snapshots')
 		# Dummy Ceph object used to retrieve the real backup Object
