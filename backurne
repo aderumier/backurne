@@ -238,7 +238,7 @@ class Bidule(object):
 							'backup': backup,
 					})
 
-	def __expire_live(self, vm):
+	def expire_vm(self, vm):
 		try:
 			px = Proxmox(self.cluster)
 			for disk in vm['to_backup']:
@@ -254,7 +254,7 @@ class Bidule(object):
 		vms = self.__filter_vm(vms)
 
 		with multiprocessing.Pool(config['snapshooter_processes']) as pool:
-			for i in pool.imap_unordered(self.__expire_live, vms):
+			for i in pool.imap_unordered(self.expire_vm, vms):
 				pass
 
 	def expire_live_plain(self):
