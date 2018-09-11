@@ -116,14 +116,6 @@ class Check(object):
 		return self.err
 
 
-def dl_worker(snap):
-	try:
-		backup = snap['backup']
-		backup.dl_snap(snap['snap_name'], snap['dest'], snap['last_snap'])
-	except Exception as e:
-		Log.error(e)
-
-
 class Bidule(object):
 	def __init__(self, cluster, queue):
 		self.cluster = cluster
@@ -264,220 +256,58 @@ class Bidule(object):
 			backup.expire_live()
 
 
-#	def px(self):
-#		px = Proxmox(self.cluster)
-#		vms = px.vms()
-#		vms = self.__filter_vm(vms)
-
-#		Log.info('I will now download %s snaps from px %s' % (len(new_snaps), self.cluster['name']))
-#		truc = multiprocessing.get_context('spawn').Pool(config['download_worker'])
-#		for i in truc.imap_unordered(dl_worker, new_snaps):
-#			pass
-#
-#		pool = multiprocessing.Pool(config['snapshooter_processes'])
-#		for i in pool.imap_unordered(self.expire_live, vms):
-#			pass
-#		pool.close()
-#		pool.join()
-
-#	def plain(self):
-#		print('plain')
-#		ceph = Ceph(self.cluster['pool'], endpoint=self.cluster['fqdn'])
-#		for rbd in ceph.ls():
-#			backup = Bck(self.cluster['name'], ceph, rbd)
-#
-#			for profile, value in config['profiles'].items():
-#				if not backup.check_profile(profile):
-#					continue
-#				dest, last_snap, snap_name = backup.make_snap(profile, value['count'])
-#				if dest is not None:
-#					backup.dl_snap(snap_name, dest, last_snap)
-#			backup.expire_live()
-
-
-class Backup(object):
-	def __init__(self, cluster):
-		self.cluster = cluster
-		if cluster['type'] == 'proxmox':
-			self.px()
+	def is_expired(snap, last=False):
+		splited = snap.split(';')
+		created_at = dateutil.parser.parse(splited[-1])
+		profile = splited[-3]
+		value = int(splited[-2])
+		if profile == 'daily':
+			expiration = datetime.timedelta(days=value)
+		elif profile == 'hourly':
+			expiration = datetime.timedelta(hours=value)
 		else:
-			self.plain()
+			Log.warn('Unknown profile found, no action taken: %s' % (profile,))
+			return False
 
-	def __filter_vm(self, vms):
-		result = list()
-		for vm in vms:
-			if vm['smbios'] is None and self.cluster['use_smbios'] is True:
-				if config['uuid_fallback'] is False:
-					Log.warn('No smbios found, skipping')
-					continue
-			result.append(vm)
-		return result
+		expired_at = created_at + expiration
+		if last is True:
+			expired_at += datetime.timedelta(days=config['extra_retention_time'])
 
-	def __fetch_profiles(self, vm, disk):
-		profiles = list(config['profiles'].items())
+		now = datetime.datetime.now()
+		if expired_at > now:
+			return False
+		return True
 
-		if config['profiles_api'] is None:
-			return profiles
 
+	def expire_img(i):
+		ceph = i['ceph']
+		image = i['image']
+
+		snaps = ceph.backup.snap(image)
 		try:
-			json = {
-				'cluster': {
-					'type': 'proxmox',
-					'name': self.cluster['name'],
-					'fqdn': self.cluster['fqdn'],
-				},
-				'vm': {
-					'vmid': vm['vmid'],
-					'name': vm['name'],
-				},
-				'disk': disk,
-			}
+			# Pop the last snapshot
+			# We will take care of it later
+			last = snaps.pop()
+		except IndexError:
+			# We found an image without snapshot
+			# Someone is messing around, or this is a bug
+			# Anyway, the image can be deleted
+			ceph.backup.rm(image)
+			return
 
-			add = requests.post(config['profiles_api'], json=json)
-			add.raise_for_status()
-			add = add.json()
+		for snap in snaps:
+			if not Bidule.is_expired(snap):
+				continue
+			ceph.backup.rm_snap(image, snap)
 
-			if 'backup' in add and add['backup'] is False:
-				return list()
+		snaps = ceph.backup.snap(image)
+		if len(snaps) == 1:
+			if Bidule.is_expired(last, last=True):
+				ceph.backup.rm_snap(image, snaps[0])
 
-			if 'profiles' in add:
-				profiles += list(add['profiles'].items())
-
-		except Exception as e:
-			Log.warn('Exception thrown while fetching more profiles for %s : %s' % (vm, e))
-		return profiles
-
-	def create_snaps(self, vm):
-		snaps = list()
-		try:
-			# Is the proxmoxer thread-safe ?
-			px = Proxmox(self.cluster)
-
-			# We freeze the VM once, thus create all snaps at the same time
-			# Exports are done after thawing, because it it time-consuming,
-			# and we must not keep the VM frozen more than necessary
-			px.freeze(vm['node'], vm)
-
-			for disk in vm['to_backup']:
-				ceph = px.ceph_storage[disk['ceph']]
-				backup = Bck(disk['ceph'], ceph, disk['rbd'], vm=vm, adapter=disk['adapter'])
-
-				profiles = self.__fetch_profiles(vm, disk)
-				for profile, value in profiles:
-					if not backup.check_profile(profile):
-						continue
-					dest, last_snap, snap_name = backup.make_snap(profile, value['count'])
-					if dest is not None:
-						snaps.append({
-								'dest': dest,
-								'last_snap': last_snap,
-								'snap_name': snap_name,
-								'backup': backup,
-						})
-			px.thaw(vm['node'], vm)
-		except Exception as e:
-			Log.warn('create_snaps: %s thrown while processing %s' % (e, vm))
-		return snaps
-
-	def expire_live(self, vm):
-		try:
-			px = Proxmox(self.cluster)
-			for disk in vm['to_backup']:
-				ceph = px.ceph_storage[disk['ceph']]
-				backup = Bck(disk['ceph'], ceph, disk['rbd'], vm=vm)
-				backup.expire_live()
-		except Exception as e:
-			Log.warn('Expire_live on %s : %s' % (vm, e))
-
-	def px(self):
-		px = Proxmox(self.cluster)
-		vms = px.vms()
-		vms = self.__filter_vm(vms)
-
-		pool = multiprocessing.Pool(config['snapshooter_processes'])
-		new_snaps = list()
-		for i in pool.imap_unordered(self.create_snaps, vms):
-			new_snaps += i
-		pool.close()
-		pool.join()
-
-		Log.info('I will now download %s snaps from px %s' % (len(new_snaps), self.cluster['name']))
-		truc = multiprocessing.get_context('spawn').Pool(config['download_worker'])
-		for i in truc.imap_unordered(dl_worker, new_snaps):
-			pass
-
-		pool = multiprocessing.Pool(config['snapshooter_processes'])
-		for i in pool.imap_unordered(self.expire_live, vms):
-			pass
-		pool.close()
-		pool.join()
-
-	def plain(self):
-		ceph = Ceph(self.cluster['pool'], endpoint=self.cluster['fqdn'])
-		for rbd in ceph.ls():
-			backup = Bck(self.cluster['name'], ceph, rbd)
-
-			for profile, value in config['profiles'].items():
-				if not backup.check_profile(profile):
-					continue
-				dest, last_snap, snap_name = backup.make_snap(profile, value['count'])
-				if dest is not None:
-					backup.dl_snap(snap_name, dest, last_snap)
-			backup.expire_live()
-
-
-def is_expired(snap, last=False):
-	splited = snap.split(';')
-	created_at = dateutil.parser.parse(splited[-1])
-	profile = splited[-3]
-	value = int(splited[-2])
-	if profile == 'daily':
-		expiration = datetime.timedelta(days=value)
-	elif profile == 'hourly':
-		expiration = datetime.timedelta(hours=value)
-	else:
-		Log.warn('Unknown profile found, no action taken: %s' % (profile,))
-		return False
-
-	expired_at = created_at + expiration
-	if last is True:
-		expired_at += datetime.timedelta(days=config['extra_retention_time'])
-
-	now = datetime.datetime.now()
-	if expired_at > now:
-		return False
-	return True
-
-
-def expire_img(i):
-	ceph = i['ceph']
-	image = i['image']
-
-	snaps = ceph.backup.snap(image)
-	try:
-		# Pop the last snapshot
-		# We will take care of it later
-		last = snaps.pop()
-	except IndexError:
-		# We found an image without snapshot
-		# Someone is messing around, or this is a bug
-		# Anyway, the image can be deleted
-		ceph.backup.rm(image)
-		return
-
-	for snap in snaps:
-		if not is_expired(snap):
-			continue
-		ceph.backup.rm_snap(image, snap)
-
-	snaps = ceph.backup.snap(image)
-	if len(snaps) == 1:
-		if is_expired(last, last=True):
-			ceph.backup.rm_snap(image, snaps[0])
-
-	if len(ceph.backup.snap(image)) == 0:
-		Log.info('%s has no snapshot left, deleting' % (image,))
-		ceph.backup.rm(image)
+		if len(ceph.backup.snap(image)) == 0:
+			Log.info('%s has no snapshot left, deleting' % (image,))
+			ceph.backup.rm(image)
 
 
 class Producer(object):
@@ -485,12 +315,21 @@ class Producer(object):
 		self.queue = queue
 
 	def __call__(self):
-		print('producer: start')
+		Log.info('producer: start')
 		try:
 			self.__work__()
 		except Exception as e:
 			Log.error('Producer: %s' % (e,))
-		print('producer: end')
+
+		# We send one None per download_worker
+		# That way, all of them shall die
+		for i in range(0, config['download_worker']):
+			try:
+				self.queue.put(None)
+			except Exception as e:
+				Log.error('Producer: cannot end a download_worker! This is a critical bug, we will never die')
+
+		Log.info('producer: end')
 
 	def __work__(self):
 		for cluster in config['live_clusters']:
@@ -498,28 +337,25 @@ class Producer(object):
 			bidule = Bidule(cluster, self.queue)
 			bidule.create_snaps()
 
-		# We send one None per download_worker
-		# That way, all of them shall die
-		for i in range(0, config['download_worker']):
-			self.queue.put(None)
 		Log.info('work ok')
+
 
 class Consumer(object):
 	def __init__(self, queue):
 		self.queue = queue
 
 	def __call__(self):
-		print('consumer: start')
+		Log.info('consumer: start')
 		try:
 			self.__work__()
 		except Exception as e:
 			Log.error('Consumer: %s' % (e,))
-		print('consumer: end')
+		Log.info('consumer: end')
 
 	def __work__(self):
 		while True:
 			snap = self.queue.get()
-			print(snap)
+			Log.info(snap)
 			if snap is None:
 				break
 
@@ -602,7 +438,7 @@ if __name__ == '__main__':
 		for i in ceph.backup.ls():
 			data.append({'ceph': ceph, 'image': i})
 		with multiprocessing.Pool(config['expire_processes']) as pool:
-			for i in pool.imap_unordered(expire_img, data):
+			for i in pool.imap_unordered(Bidule.expire_img, data):
 				pass
 		exit(0)
 
