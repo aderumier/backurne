@@ -22,15 +22,6 @@ class Check(object):
 		self.cluster = cluster
 		self.err = list()
 
-		if cluster['type'] == 'proxmox':
-			self.px = Proxmox(cluster)
-			self.check = self.check_px
-			self.check_snap = self.check_snap_px
-		else:
-			self.ceph = Ceph(self.cluster['pool'], endpoint=self.cluster['fqdn'])
-			self.check = self.check_plain
-			self.check_snap = self.check_snap_plain
-
 	def add_err(self, msg):
 		if msg is None:
 			return
@@ -79,7 +70,13 @@ class Check(object):
 			self.add_err('\tOn live (image: %s): %s' % (rbd, live))
 			self.add_err('\tOn backup (image: %s): %s' % (backup.dest, back))
 
-	def check_px(self):
+
+class CheckProxmox(Check):
+	def __init__(self, cluster):
+		super().__init__(cluster)
+		self.px = Proxmox(cluster)
+
+	def check(self):
 		data = list()
 		for vm in self.px.vms():
 			for disk in vm['to_backup']:
@@ -94,13 +91,7 @@ class Check(object):
 
 		return self.err
 
-	def check_plain(self):
-		for rbd in self.ceph.ls():
-			bck = Bck(self.cluster['name'], self.ceph, rbd)
-			self.check_img(self.ceph, bck, rbd)
-		return self.err
-
-	def check_snap_px(self):
+	def check_snap(self):
 		for vm in self.px.vms():
 			for disk in vm['to_backup']:
 				ceph = self.px.ceph_storage[disk['ceph']]
@@ -108,7 +99,19 @@ class Check(object):
 				self.cmp_snap(bck, ceph, disk['rbd'])
 		return self.err
 
-	def check_snap_plain(self):
+
+class CheckPlain(Check):
+	def __init__(self, cluster):
+		super().__init__(cluster)
+		self.ceph = Ceph(self.cluster['pool'], endpoint=self.cluster['fqdn'])
+
+	def check(self):
+		for rbd in self.ceph.ls():
+			bck = Bck(self.cluster['name'], self.ceph, rbd)
+			self.check_img(self.ceph, bck, rbd)
+		return self.err
+
+	def check_snap(self):
 		for rbd in self.ceph.ls():
 			bck = Bck(self.cluster['name'], self.ceph, rbd)
 			self.cmp_snap(bck, self.ceph, rbd)
@@ -411,7 +414,10 @@ if __name__ == '__main__':
 
 		for cluster in config['live_clusters']:
 			Log.info('Checking %s: %s' % (cluster['type'], cluster['name']))
-			check = Check(cluster)
+			if cluster['type'] == 'proxmox':
+				check = CheckProxmox(cluster)
+			else:
+				check = CheckPlain(cluster)
 			if action == 'check':
 				ret = check.check()
 			else:
