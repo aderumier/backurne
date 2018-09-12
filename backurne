@@ -17,7 +17,7 @@ from backup import Bck
 
 
 # High level class, used for check-related stuff
-class Check(object):
+class Check():
 	def __init__(self, cluster):
 		self.cluster = cluster
 		self.err = list()
@@ -118,7 +118,7 @@ class CheckPlain(Check):
 		return self.err
 
 
-class Bidule(object):
+class Bidule():
 	# On this module, an "item" is either:
 	# - a vm object, for proxmox
 	# - a rbd image, for plain
@@ -338,7 +338,7 @@ class Bidule(object):
 			ceph.backup.rm(image)
 
 
-class Producer(object):
+class Producer():
 	def __init__(self, queue):
 		self.queue = queue
 
@@ -368,7 +368,7 @@ class Producer(object):
 		Log.info('work ok')
 
 
-class Consumer(object):
+class Consumer():
 	def __init__(self, queue):
 		self.queue = queue
 

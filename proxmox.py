@@ -6,7 +6,7 @@ from proxmoxer import ProxmoxAPI
 
 
 # Low level class
-class Proxmox(object):
+class Proxmox():
 	def __init__(self, px_config):
 		self.px_config = px_config
 		self.px = ProxmoxAPI(px_config['fqdn'],
