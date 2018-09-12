@@ -80,62 +80,52 @@ class Check(object):
 			self.add_err('\tOn backup (image: %s): %s' % (backup.dest, back))
 
 	def check_px(self):
-		pool = multiprocessing.Pool()
-
 		data = list()
 		for vm in self.px.vms():
 			for disk in vm['to_backup']:
 				ceph = self.px.ceph_storage[disk['ceph']]
-				backup = Bck(disk['ceph'], ceph, disk['rbd'], vm=vm, adapter=disk['adapter'])
-				data.append({'ceph': ceph, 'backup': backup, 'image': disk['rbd']})
+				bck = Bck(disk['ceph'], ceph, disk['rbd'], vm=vm, adapter=disk['adapter'])
+				data.append({'ceph': ceph, 'backup': bck, 'image': disk['rbd']})
 
 		self.err = list()
-		for msg in pool.imap_unordered(self.check_img, data):
-			self.add_err(msg)
+		with multiprocessing.Pool() as pool:
+			for msg in pool.imap_unordered(self.check_img, data):
+				self.add_err(msg)
 
 		return self.err
 
 	def check_plain(self):
 		for rbd in self.ceph.ls():
-			backup = Bck(self.cluster['name'], self.ceph, rbd)
-			self.check_img(self.ceph, backup, rbd)
+			bck = Bck(self.cluster['name'], self.ceph, rbd)
+			self.check_img(self.ceph, bck, rbd)
 		return self.err
 
 	def check_snap_px(self):
 		for vm in self.px.vms():
 			for disk in vm['to_backup']:
 				ceph = self.px.ceph_storage[disk['ceph']]
-				backup = Bck(disk['ceph'], ceph, disk['rbd'], vm=vm, adapter=disk['adapter'])
-				self.cmp_snap(backup, ceph, disk['rbd'])
+				bck = Bck(disk['ceph'], ceph, disk['rbd'], vm=vm, adapter=disk['adapter'])
+				self.cmp_snap(bck, ceph, disk['rbd'])
 		return self.err
 
 	def check_snap_plain(self):
 		for rbd in self.ceph.ls():
-			backup = Bck(self.cluster['name'], self.ceph, rbd)
-			self.cmp_snap(backup, self.ceph, rbd)
+			bck = Bck(self.cluster['name'], self.ceph, rbd)
+			self.cmp_snap(bck, self.ceph, rbd)
 		return self.err
 
 
 class Bidule(object):
+	# On this module, an "item" is either:
+	# - a vm object, for proxmox
+	# - a rbd image, for plain
 	def __init__(self, cluster, queue):
 		self.cluster = cluster
 		self.queue = queue
 		if cluster['type'] == 'proxmox':
-			self.create_snaps = self.create_snaps_px
-			self.expire_live = self.expire_live_px
+			self.px = Proxmox(self.cluster)
 		else:
-			self.create_snaps = self.create_snaps_plain
-			self.expire_live = self.expire_live_plain
-
-	def __filter_vm(self, vms):
-		result = list()
-		for vm in vms:
-			if vm['smbios'] is None and self.cluster['use_smbios'] is True:
-				if config['uuid_fallback'] is False:
-					Log.warn('No smbios found, skipping')
-					continue
-			result.append(vm)
-		return result
+			self.ceph = Ceph(self.cluster['pool'], endpoint=self.cluster['fqdn'])
 
 	def __fetch_profiles(self, vm, disk):
 		profiles = list(config['profiles'].items())
@@ -168,91 +158,23 @@ class Bidule(object):
 				profiles += list(add['profiles'].items())
 
 		except Exception as e:
-			Log.warn('Exception thrown while fetching more profiles for %s : %s' % (vm, e))
+			Log.warn('Exception thrown while fetching profiles for %s : %s' % (vm, e))
 		return profiles
 
-	def create_snap_px(self, vm):
-		px = Proxmox(self.cluster)
-		try:
-			# We freeze the VM once, thus create all snaps at the same time
-			# Exports are done after thawing, because it it time-consuming,
-			# and we must not keep the VM frozen more than necessary
-			px.freeze(vm['node'], vm)
+	def list_items(self):
+		if self.cluster['type'] != 'proxmox':
+			return self.ceph.ls()
 
-			for disk in vm['to_backup']:
-				ceph = px.ceph_storage[disk['ceph']]
-				backup = Bck(disk['ceph'], ceph, disk['rbd'], vm=vm, adapter=disk['adapter'])
+		vms = self.px.vms()
 
-				profiles = self.__fetch_profiles(vm, disk)
-				for profile, value in profiles:
-					if not backup.check_profile(profile):
-						continue
-					dest, last_snap, snap_name = backup.make_snap(profile, value['count'])
-					if dest is not None:
-						queue.put({
-								'dest': dest,
-								'last_snap': last_snap,
-								'snap_name': snap_name,
-								'backup': backup,
-						})
-		except Exception as e:
-			Log.warn('create_snaps: %s thrown while processing %s' % (e, vm))
-
-		try:
-			px.thaw(vm['node'], vm)
-		except:
-			Log.warn('create_snaps: thaw failed while processing %s' % (vm,))
-
-	def create_snaps_px(self):
-		px = Proxmox(self.cluster)
-		vms = px.vms()
-		vms = self.__filter_vm(vms)
-
-		with multiprocessing.Pool(config['snapshooter_processes']) as pool:
-			for i in pool.imap_unordered(self.create_snap_px, vms):
-				pass
-
-	def create_snaps_plain(self):
-		ceph = Ceph(self.cluster['pool'], endpoint=self.cluster['fqdn'])
-		for rbd in ceph.ls():
-			backup = Bck(self.cluster['name'], ceph, rbd)
-
-			for profile, value in config['profiles'].items():
-				if not backup.check_profile(profile):
+		result = list()
+		for vm in vms:
+			if vm['smbios'] is None and self.cluster['use_smbios'] is True:
+				if config['uuid_fallback'] is False:
+					Log.warn('No smbios found, skipping')
 					continue
-				dest, last_snap, snap_name = backup.make_snap(profile, value['count'])
-				if dest is not None:
-					self.queue.put({
-							'dest': dest,
-							'last_snap': last_snap,
-							'snap_name': snap_name,
-							'backup': backup,
-					})
-
-	def expire_vm(self, vm):
-		try:
-			px = Proxmox(self.cluster)
-			for disk in vm['to_backup']:
-				ceph = px.ceph_storage[disk['ceph']]
-				backup = Bck(disk['ceph'], ceph, disk['rbd'], vm=vm)
-				backup.expire_live()
-		except Exception as e:
-			Log.warn('Expire_live on %s : %s' % (vm, e))
-
-	def expire_live_px(self):
-		px = Proxmox(self.cluster)
-		vms = px.vms()
-		vms = self.__filter_vm(vms)
-
-		with multiprocessing.Pool(config['snapshooter_processes']) as pool:
-			for i in pool.imap_unordered(self.expire_vm, vms):
-				pass
-
-	def expire_live_plain(self):
-		ceph = Ceph(self.cluster['pool'], endpoint=self.cluster['fqdn'])
-		for rbd in ceph.ls():
-			backup = Bck(self.cluster['name'], ceph, rbd)
-			backup.expire_live()
+			result.append(vm)
+		return result
 
 	def is_expired(snap, last=False):
 		splited = snap.split(';')
@@ -276,7 +198,113 @@ class Bidule(object):
 			return False
 		return True
 
-	def expire_img(i):
+	def create_snap_px(self, vm):
+		try:
+			# We freeze the VM once, thus create all snaps at the same time
+			# Exports are done after thawing, because it it time-consuming,
+			# and we must not keep the VM frozen more than necessary
+			self.px.freeze(vm['node'], vm)
+
+			for disk in vm['to_backup']:
+				ceph = self.px.ceph_storage[disk['ceph']]
+				bck = Bck(disk['ceph'], ceph, disk['rbd'], vm=vm, adapter=disk['adapter'])
+
+				profiles = self.__fetch_profiles(vm, disk)
+				self.__create_snap(bck, profiles)
+		except Exception as e:
+			Log.warn('create_snaps: %s thrown while processing %s' % (e, vm))
+
+		try:
+			self.px.thaw(vm['node'], vm)
+		except:
+			Log.warn('create_snaps: thaw failed while processing %s' % (vm,))
+
+	def create_snap_plain(self, rbd):
+		bck = Bck(self.cluster['name'], self.ceph, rbd)
+		self.__create_snap(bck, config['profiles'].items())
+
+	def __create_snap(self, bck, profiles):
+		for profile, value in profiles:
+			if not bck.check_profile(profile):
+				continue
+			dest, last_snap, snap_name = bck.make_snap(profile, value['count'])
+			if dest is not None:
+				queue.put({
+						'dest': dest,
+						'last_snap': last_snap,
+						'snap_name': snap_name,
+						'backup': bck,
+				})
+
+	def create_snaps(self):
+		items = self.list_items()
+		with multiprocessing.Pool(config['snapshooter_processes']) as pool:
+			if self.cluster['type'] == 'proxmox':
+				function = self.create_snap_px
+			else:
+				function = self.create_snap_plain
+			for i in pool.imap_unordered(function, items):
+				pass
+
+	def expire_plop(ceph, rbd):
+		snaps = ceph.snap(rbd)
+		try:
+			snaps.pop()  # We must never delete the latest snapshot
+		except IndexError:
+			# No snap found .. ?!
+			return
+
+		by_profile = {}
+		for snap in snaps:
+			tmp = snap.split(';')
+			if tmp[1] not in by_profile:
+				by_profile[tmp[1]] = list()
+			i = by_profile[tmp[1]]
+			i.append(snap)
+
+		to_del = list()
+		for profile, snaps in by_profile.items():
+			try:
+				profile = config['profiles'][profile]
+			except KeyError:
+				# Profile no longer exists, we can drop all these snaps
+				to_del += snaps
+				continue
+			try:
+				max_on_live = profile['max_on_live']
+			except KeyError:
+				max_on_live = 1
+
+			for _ in range(0, max_on_live):
+				try:
+					snaps.pop()
+				except IndexError:
+					# We do not have enough snaps on live
+					# snaps is now an empty list, nothing to delete
+					break
+
+			to_del += snaps
+		for i in to_del:
+			ceph.rm_snap(rbd, i)
+
+	def expire_live(self):
+		items = self.list_items()
+		with multiprocessing.Pool(config['snapshooter_processes']) as pool:
+			for i in pool.imap_unordered(self.expire_item, items):
+				pass
+
+	def expire_item(self, item):
+		try:
+			if self.cluster['type'] == 'proxmox':
+				for disk in item['to_backup']:
+					ceph = self.px.ceph_storage[disk['ceph']]
+					Bidule.expire_plop(ceph, disk['rbd'])
+			else:
+				Bidule.expire_plop(self.ceph, item)
+		except Exception as e:
+			Log.warn('Expire_live on %s : %s' % (item, e))
+
+	def expire_backup(i):
 		ceph = i['ceph']
 		image = i['image']
 
@@ -435,7 +463,7 @@ if __name__ == '__main__':
 		for i in ceph.backup.ls():
 			data.append({'ceph': ceph, 'image': i})
 		with multiprocessing.Pool(config['expire_processes']) as pool:
-			for i in pool.imap_unordered(Bidule.expire_img, data):
+			for i in pool.imap_unordered(Bidule.expire_backup, data):
 				pass
 		exit(0)
 

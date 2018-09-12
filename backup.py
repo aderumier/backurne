@@ -73,12 +73,12 @@ class Bck(object):
 		else:
 			delta = datetime.timedelta(hours=1)
 		not_after = datetime.datetime.now() - delta
-#		if last_profile is not None:
-#			last_time = last_profile.split(';')[3]
-#			last_time = dateutil.parser.parse(last_time)
-#			if last_time > not_after:
-#				Log.info('Our last backup is still young, nothing to do')
-#				return False
+		if last_profile is not None:
+			last_time = last_profile.split(';')[3]
+			last_time = dateutil.parser.parse(last_time)
+			if last_time > not_after:
+				Log.info('Our last backup is still young, nothing to do')
+				return False
 		return True
 
 	def make_snap(self, profile, value):
@@ -108,47 +108,6 @@ class Bck(object):
 		snap_name = '%s;%s' % (self.snap_name, now)
 		self.last_created_snap = snap_name
 
-#		self.ceph.mk_snap(self.rbd, snap_name, self.vm)
+		self.ceph.mk_snap(self.rbd, snap_name, self.vm)
 
 		return dest, last_snap, snap_name
-
-	def expire_live(self):
-		snaps = self.ceph.snap(self.rbd)
-		try:
-			snaps.pop()  # We must never delete the latest snapshot
-		except IndexError:
-			# No snap found .. ?!
-			return
-
-		by_profile = {}
-		for snap in snaps:
-			tmp = snap.split(';')
-			if tmp[1] not in by_profile:
-				by_profile[tmp[1]] = list()
-			i = by_profile[tmp[1]]
-			i.append(snap)
-
-		to_del = list()
-		for profile, snaps in by_profile.items():
-			try:
-				profile = config['profiles'][profile]
-			except KeyError:
-				# Profile no longer exists, we can drop all these snaps
-				to_del += snaps
-				continue
-			try:
-				max_on_live = profile['max_on_live']
-			except KeyError:
-				max_on_live = 1
-
-			for _ in range(0, max_on_live):
-				try:
-					snaps.pop()
-				except IndexError:
-					# We do not have enough snaps on live
-					# snaps is now an empty list, nothing to delete
-					break
-
-			to_del += snaps
-		for i in to_del:
-			self.ceph.rm_snap(self.rbd, i)
