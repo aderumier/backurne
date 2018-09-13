@@ -118,7 +118,7 @@ class CheckPlain(Check):
 		return self.err
 
 
-class Bidule():
+class Backup():
 	def __init__(self, cluster, queue):
 		self.cluster = cluster
 		self.queue = queue
@@ -228,13 +228,13 @@ class Bidule():
 			return
 
 		for snap in snaps:
-			if not Bidule.is_expired(snap):
+			if not Backup.is_expired(snap):
 				continue
 			ceph.backup.rm_snap(image, snap)
 
 		snaps = ceph.backup.snap(image)
 		if len(snaps) == 1:
-			if Bidule.is_expired(last, last=True):
+			if Backup.is_expired(last, last=True):
 				ceph.backup.rm_snap(image, snaps[0])
 
 		if len(ceph.backup.snap(image)) == 0:
@@ -242,7 +242,7 @@ class Bidule():
 			ceph.backup.rm(image)
 
 
-class BiduleProxmox(Bidule):
+class BackupProxmox(Backup):
 	def __init__(self, cluster, queue):
 		super().__init__(cluster, queue)
 		self.px = Proxmox(self.cluster)
@@ -323,7 +323,7 @@ class BiduleProxmox(Bidule):
 			Log.warn('Expire_live on %s : %s' % (item, e))
 
 
-class BidulePlain(Bidule):
+class BackupPlain(Backup):
 	def __init__(self, cluster, queue):
 		super().__init__(cluster, queue)
 		self.ceph = Ceph(self.cluster['pool'], endpoint=self.cluster['fqdn'])
@@ -347,7 +347,7 @@ class Producer():
 		self.queue = queue
 
 	def __call__(self):
-		Log.info('producer: start')
+		Log.debug('Producer started')
 		try:
 			self.__work__()
 		except Exception as e:
@@ -361,18 +361,16 @@ class Producer():
 			except Exception as e:
 				Log.error('Producer: cannot end a live_worker! This is a critical bug, we will never die')
 
-		Log.info('producer: end')
+		Log.debug('Producer ended')
 
 	def __work__(self):
 		for cluster in config['live_clusters']:
 			Log.info('Backuping %s: %s' % (cluster['type'], cluster['name']))
 			if cluster['type'] == 'proxmox':
-				bidule = BiduleProxmox(cluster, self.queue)
+				bidule = BackupProxmox(cluster, self.queue)
 			else:
-				bidule = BidulePlain(cluster, self.queue)
+				bidule = BackupPlain(cluster, self.queue)
 			bidule.create_snaps()
-
-		Log.info('work ok')
 
 
 class Consumer():
@@ -380,12 +378,12 @@ class Consumer():
 		self.queue = queue
 
 	def __call__(self):
-		Log.info('consumer: start')
+		Log.debug('Consumer started')
 		try:
 			self.__work__()
 		except Exception as e:
 			Log.error('Consumer: %s' % (e,))
-		Log.info('consumer: end')
+		Log.debug('Consumer ended')
 
 	def __work__(self):
 		while True:
@@ -461,15 +459,13 @@ if __name__ == '__main__':
 
 		manager.shutdown()
 
-		# FIXME
-		CLASS = BiduleProxmox
-
-		Log.info('Le manager est mort!')
 		for cluster in config['live_clusters']:
 			Log.info('Expire snapshots from live %s: %s' % (cluster['type'], cluster['name']))
-			bidule = CLASS(cluster, None)
+			if cluster['type'] == 'proxmox':
+				bidule = BackupProxmox(cluster, None)
+			else:
+				bidule = BackupPlain(cluster, None)
 			bidule.expire_live()
-		Log.info('expire terminé')
 
 		Log.info('Expiring our snapshots')
 		# Dummy Ceph object used to retrieve the real backup Object
@@ -479,7 +475,7 @@ if __name__ == '__main__':
 		for i in ceph.backup.ls():
 			data.append({'ceph': ceph, 'image': i})
 		with multiprocessing.Pool(config['backup_worker']) as pool:
-			for i in pool.imap_unordered(CLASS.expire_backup, data):
+			for i in pool.imap_unordered(Backup.expire_backup, data):
 				pass
 		exit(0)
 
