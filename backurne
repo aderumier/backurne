@@ -160,7 +160,7 @@ class Bidule():
 
 	def create_snaps(self):
 		items = self.list()
-		with multiprocessing.Pool(config['snapshooter_processes']) as pool:
+		with multiprocessing.Pool(config['live_worker']) as pool:
 			for i in pool.imap_unordered(self.create_snap, items):
 				pass
 
@@ -207,7 +207,7 @@ class Bidule():
 
 	def expire_live(self):
 		items = self.list()
-		with multiprocessing.Pool(config['snapshooter_processes']) as pool:
+		with multiprocessing.Pool(config['live_worker']) as pool:
 			for i in pool.imap_unordered(self.expire_item, items):
 				pass
 
@@ -353,13 +353,13 @@ class Producer():
 		except Exception as e:
 			Log.error('Producer: %s' % (e,))
 
-		# We send one None per download_worker
+		# We send one None per live_worker
 		# That way, all of them shall die
-		for i in range(0, config['download_worker']):
+		for i in range(0, config['live_worker']):
 			try:
 				self.queue.put(None)
 			except Exception as e:
-				Log.error('Producer: cannot end a download_worker! This is a critical bug, we will never die')
+				Log.error('Producer: cannot end a live_worker! This is a critical bug, we will never die')
 
 		Log.info('producer: end')
 
@@ -447,16 +447,16 @@ if __name__ == '__main__':
 		atexit.register(producer.terminate)
 		producer.start()
 
-		download_workers = list()
-		for i in range(0, config['download_worker']):
+		live_workers = list()
+		for i in range(0, config['live_worker']):
 			pid = multiprocessing.Process(target=Consumer(queue))
 			atexit.register(pid.terminate)
-			download_workers.append(pid)
+			live_workers.append(pid)
 			pid.start()
 
 		# Workers will exit upon a None reception
 		# When all of them are done, we are done
-		for pid in download_workers:
+		for pid in live_workers:
 			pid.join()
 
 		manager.shutdown()
@@ -478,7 +478,7 @@ if __name__ == '__main__':
 		data = list()
 		for i in ceph.backup.ls():
 			data.append({'ceph': ceph, 'image': i})
-		with multiprocessing.Pool(config['expire_processes']) as pool:
+		with multiprocessing.Pool(config['backup_worker']) as pool:
 			for i in pool.imap_unordered(CLASS.expire_backup, data):
 				pass
 		exit(0)
