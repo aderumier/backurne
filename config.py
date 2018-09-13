@@ -1,5 +1,6 @@
 import collections
 import importlib.util
+import os
 
 
 # Random code from https://gist.github.com/angstwad/bf22d1822c38a92ec0a9
@@ -43,6 +44,7 @@ def load_config():
 		'backup_worker': 24,
 		'live_worker': 12,
 		'hash_binary': '/usr/bin/md5sum',
+		'lockdir': '/tmp/backurne/locks',
 	}
 
 	for custom in ('custom.conf',):
@@ -59,6 +61,9 @@ def load_config():
 	if ';' in prefix or ';' in prefix:
 		print('''fatal: "'" or " " found in snap_prefix (%s)''' % (prefix,))
 		exit(1)
+
+	if not os.path.exists(config['lockdir']):
+		os.makedirs(config['lockdir'])
 
 	return config
 

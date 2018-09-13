@@ -153,4 +153,8 @@ config = {
 	# This executable must live on every Ceph cluster, as well as the backup
 	# node, because hash is done remotely
 	#'hash_binary': 'md5sum',
+
+	# Before any operation on an image on the backup cluster, a lock
+	# is set for this image.
+	#'lockdir': '/tmp/backurne/locks',
 }

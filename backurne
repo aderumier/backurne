@@ -4,6 +4,7 @@ import atexit
 import datetime
 import dateutil.parser
 import multiprocessing
+import fcntl
 import requests
 import sys
 
@@ -211,6 +212,7 @@ class Backup():
 				pass
 
 	def expire_backup(i):
+		# TODO: lock the image, unlock on exit
 		ceph = i['ceph']
 		image = i['image']
 
@@ -244,7 +246,6 @@ class Backup():
 class BackupProxmox(Backup):
 	def __init__(self, cluster, queue):
 		super().__init__(cluster, queue)
-		self.px = Proxmox(self.cluster)
 
 	def __fetch_profiles(self, vm, disk):
 		profiles = list(config['profiles'].items())
@@ -281,7 +282,8 @@ class BackupProxmox(Backup):
 		return profiles
 
 	def list(self):
-		vms = self.px.vms()
+		px = Proxmox(self.cluster)
+		vms = px.vms()
 
 		result = list()
 		for vm in vms:
@@ -293,14 +295,15 @@ class BackupProxmox(Backup):
 		return result
 
 	def create_snap(self, vm):
+		px = Proxmox(self.cluster)
 		try:
 			# We freeze the VM once, thus create all snaps at the same time
 			# Exports are done after thawing, because it it time-consuming,
 			# and we must not keep the VM frozen more than necessary
-			self.px.freeze(vm['node'], vm)
+			px.freeze(vm['node'], vm)
 
 			for disk in vm['to_backup']:
-				ceph = self.px.ceph_storage[disk['ceph']]
+				ceph = px.ceph_storage[disk['ceph']]
 				bck = Bck(disk['ceph'], ceph, disk['rbd'], vm=vm, adapter=disk['adapter'])
 
 				profiles = self.__fetch_profiles(vm, disk)
@@ -309,14 +312,15 @@ class BackupProxmox(Backup):
 			Log.warn('create_snaps: %s thrown while processing %s' % (e, vm))
 
 		try:
-			self.px.thaw(vm['node'], vm)
+			px.thaw(vm['node'], vm)
 		except:
 			Log.warn('create_snaps: thaw failed while processing %s' % (vm,))
 
 	def expire_item(self, item):
+		px = Proxmox(self.cluster)
 		try:
 			for disk in item['to_backup']:
-				ceph = self.px.ceph_storage[disk['ceph']]
+				ceph = px.ceph_storage[disk['ceph']]
 				self._expire_item(ceph, disk['rbd'])
 		except Exception as e:
 			Log.warn('Expire_live on %s : %s' % (item, e))
@@ -384,18 +388,45 @@ class Consumer():
 			Log.error('Consumer: %s' % (e,))
 		Log.debug('Consumer ended')
 
+	def __lock(self, name):
+		filename = name.replace('/', '')
+		fd = open('%s/%s' % (config['lockdir'], filename), 'a')
+		try:
+			fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+		except:
+			return None
+		return fd
+
+	def __unlock(self, lock, snap):
+		try:
+			fcntl.lockf(lock, fcntl.LOCK_UN)
+		except:
+			return False
+		return True
+
 	def __work__(self):
 		while True:
 			snap = self.queue.get()
-			Log.info(snap)
+			Log.debug(snap)
 			if snap is None:
 				break
+
+			lock = self.__lock(snap['dest'])
+			if lock is None:
+				Log.info('lock failed on %s' % (snap,))
+				return
 
 			try:
 				backup = snap['backup']
 				backup.dl_snap(snap['snap_name'], snap['dest'], snap['last_snap'])
 			except Exception as e:
 				Log.error(e)
+
+			# TODO: Expire live
+			# TODO: Expire backup
+
+			if self.__unlock(self, lock) is False:
+				Log.info('unlock failed on %s' % (snap,))
 
 
 if __name__ == '__main__':
