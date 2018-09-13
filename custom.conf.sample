@@ -131,7 +131,6 @@ config = {
 	# Can be any of 'debug', 'info', 'warn', 'err'
 	#'log_level': 'debug',
 
-
 	# How many workers should be used when we parallelize
 	# tasks on the backup cluster
 	#'backup_worker': 24,
